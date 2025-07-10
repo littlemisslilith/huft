@@ -2,77 +2,75 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
-import datetime
-from ta.volatility import BollingerBands
-from ta.trend import EMAIndicator
-from ta.momentum import RSIIndicator, StochasticOscillator
+import plotly.graph_objs as go
+from datetime import datetime, timedelta
 
-# Custom Forecast Function
-def gbm_forecast(S0, mu, sigma, phi, lambd, horizon=24):
-    dt = 1 / 24
-    forecast = [S0]
-    for _ in range(horizon):
-        drift = (mu - 0.5 * sigma**2) * dt * phi
-        shock = sigma * np.sqrt(dt) * np.random.normal() * lambd
-        S_next = forecast[-1] * np.exp(drift + shock)
-        forecast.append(S_next)
-    return forecast
+# === CONFIG ===
+st.set_page_config(page_title="ETH Forecast Dashboard", layout="wide")
 
-# Symbol map
-symbol_map = {
-    "ETH-USD": "ethusdt",
-    "BTC-USD": "btcusdt",
-    "SOL-USD": "solusdt"
-}
+# === PARAMETERS ===
+st.sidebar.markdown("🎯 **Forecast Settings**")
+mu = st.sidebar.slider("Expected Return (μ)", 0.00, 0.02, 0.01, step=0.001)
+sigma = st.sidebar.slider("Volatility (σ)", 0.00, 0.10, 0.06, step=0.001)
+phi = st.sidebar.slider("Phi (Drift Adj)", 0.90, 1.10, 1.0, step=0.01)
+lamb = st.sidebar.slider("Lambda (Rate)", 0.1, 2.0, 1.0, step=0.1)
 
-# App UI
-st.sidebar.header("📍 Forecast Settings")
-symbol = st.sidebar.selectbox("Choose Symbol", list(symbol_map.keys()))
-mu = st.sidebar.slider("Expected Return (μ)", 0.00, 0.02, 0.01, 0.001)
-sigma = st.sidebar.slider("Volatility (σ)", 0.00, 0.10, 0.06, 0.001)
-phi = st.sidebar.slider("Phi (Drift Adj)", 0.90, 1.10, 1.00, 0.01)
-lambd = st.sidebar.slider("Lambda (Rate)", 0.10, 2.00, 1.00, 0.01)
+# === FUNCTIONS ===
 
-st.title("📊 Ethereum (ETH) Price Dashboard")
-
-def fetch_binance_klines(symbol, interval='1h', limit=500):
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol.upper()}&interval={interval}&limit={limit}"
-    r = requests.get(url)
-    data = r.json()
+def get_binance_data(symbol="ETHUSDT", interval="1h", limit=100):
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+    response = requests.get(url)
+    data = response.json()
     df = pd.DataFrame(data, columns=[
-        'Open time', 'Open', 'High', 'Low', 'Close', 'Volume',
-        'Close time', 'Quote asset volume', 'Number of trades',
-        'Taker buy base asset volume', 'Taker buy quote asset volume', 'Ignore'
+        "timestamp", "open", "high", "low", "close", "volume",
+        "close_time", "quote_asset_volume", "number_of_trades",
+        "taker_buy_base_vol", "taker_buy_quote_vol", "ignore"
     ])
-    df['Open time'] = pd.to_datetime(df['Open time'], unit='ms')
-    df.set_index('Open time', inplace=True)
-    for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
-        df[col] = pd.to_numeric(df[col], errors='coerce')
-    df = df[['Open', 'High', 'Low', 'Close', 'Volume']].dropna()
-    return df
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+    df["close"] = df["close"].astype(float)
+    df.set_index("timestamp", inplace=True)
+    return df[["close"]]
 
-try:
-    df = fetch_binance_klines(symbol_map[symbol])
-    if df.empty or len(df) < 25:
-        st.error("⚠️ Not enough data to compute indicators.")
-    else:
-        # Indicators
-        df['EMA50'] = EMAIndicator(df['Close'], window=50).ema_indicator()
-        df['EMA200'] = EMAIndicator(df['Close'], window=200).ema_indicator()
-        df['RSI'] = RSIIndicator(df['Close'], window=14).rsi()
-        bollinger = BollingerBands(close=df['Close'], window=20, window_dev=2)
-        df['BB_upper'] = bollinger.bollinger_hband()
-        df['BB_lower'] = bollinger.bollinger_lband()
-        df['Premium'] = df['Close'].rolling(24).max() - df['Close']
-        df['Discount'] = df['Close'] - df['Close'].rolling(24).min()
+def gbm_forecast(S0, mu, sigma, phi, lamb, T=24, dt=1):
+    steps = int(T / dt)
+    prices = [S0]
+    for _ in range(steps):
+        drift = (mu - 0.5 * sigma ** 2) * dt
+        shock = sigma * np.sqrt(dt) * phi * lamb * np.random.normal()
+        S_t = prices[-1] * np.exp(drift + shock)
+        prices.append(S_t)
+    return prices
 
-        last_price = df['Close'].iloc[-1]
-        forecast = gbm_forecast(last_price, mu, sigma, phi, lambd)
+# === FETCH LIVE DATA ===
+df = get_binance_data()
 
-        st.subheader(f"{symbol} Latest Price: ${last_price:,.2f}")
-        st.line_chart(pd.Series(forecast, name="24H Forecast"))
+if df.empty or len(df) < 24:
+    st.error("Live data fetch failed or too short. Try again later.")
+else:
+    # === FORECAST CALC ===
+    last_price = df["close"].iloc[-1]
+    forecast = gbm_forecast(S0=last_price, mu=mu, sigma=sigma, phi=phi, lamb=lamb)
+    forecast_times = [df.index[-1] + timedelta(hours=i) for i in range(len(forecast))]
 
-        st.subheader("📈 Technical Snapshot")
-        st.write(df.tail(5))
-except Exception as e:
-    st.error(f"Something went wrong: {e}")
+    # === PREMIUM/DISCOUNT ZONES ===
+    premium = df["close"].rolling(24).max().iloc[-1]
+    discount = df["close"].rolling(24).min().iloc[-1]
+
+    # === PLOT ===
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=df.index, y=df["close"], mode='lines', name='ETH Price'))
+    fig.add_trace(go.Scatter(x=forecast_times, y=forecast, mode='lines', name='Forecast'))
+
+    fig.add_hline(y=premium, line_dash="dot", line_color="red", annotation_text="Premium Zone", annotation_position="top left")
+    fig.add_hline(y=discount, line_dash="dot", line_color="green", annotation_text="Discount Zone", annotation_position="bottom left")
+
+    fig.update_layout(title="📈 Ethereum (ETH) Price Dashboard", xaxis_title="Time", yaxis_title="Price (USD)", template="plotly_dark")
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    # === STATS ===
+    st.subheader("🔍 Latest Metrics")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Last Price", f"${last_price:,.2f}")
+    col2.metric("Premium", f"${premium:,.2f}")
+    col3.metric("Discount", f"${discount:,.2f}")
