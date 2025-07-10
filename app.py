@@ -1,126 +1,128 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+import math
 import requests
-import time
-from datetime import datetime, timedelta
+from datetime import datetime
+from ta.momentum import RSIIndicator
+from ta.trend import MACD, EMAIndicator, IchimokuIndicator
+from ta.volatility import BollingerBands
 
-# ========== CONFIG ==========
-st.set_page_config(page_title="ETH Forecast Dashboard", layout="wide")
-st.title("📊 Ethereum (ETH) Price Dashboard")
+# --- CONFIG ---
+st.set_page_config(page_title="Crypto Dashboard", layout="wide")
+symbols = {"ETH/USDT": "ETHUSDT", "BTC/USDT": "BTCUSDT", "SOL/USDT": "SOLUSDT"}
+symbol = st.sidebar.selectbox("Choose Symbol", list(symbols.keys()))
+symbol_binance = symbols[symbol]
 
-# Sidebar config
-st.sidebar.header("📍 Forecast Settings")
-mu = st.sidebar.slider("Expected Return (μ)", 0.0, 0.02, 0.01, step=0.001)
-sigma = st.sidebar.slider("Volatility (σ)", 0.0, 0.05, 0.01, step=0.001)
+mu = st.sidebar.slider("Expected Return (μ)", 0.0000, 0.0200, 0.0100)
+sigma = st.sidebar.slider("Volatility (σ)", 0.000, 0.100, 0.060)
+phi = st.sidebar.slider("Phi (Drift Adj)", 0.90, 1.10, 1.00)
+lambda_ = st.sidebar.slider("Lambda (Rate)", 0.1, 2.0, 1.0)
 
-# ========== LOAD LIVE DATA ==========
-@st.cache_data(ttl=60)
-def fetch_data():
-    url = "https://api.binance.com/api/v3/klines"
-    params = {"symbol": "ETHUSDT", "interval": "1h", "limit": 100}
-    response = requests.get(url, params=params)
-    data = response.json()
-    df = pd.DataFrame(data, columns=[
-        "open_time", "open", "high", "low", "close", "volume",
-        "close_time", "quote_asset_volume", "trades", "taker_base_vol", "taker_quote_vol", "ignore"
-    ])
-    df["time"] = pd.to_datetime(df["open_time"], unit="ms")
-    df["close"] = df["close"].astype(float)
-    df.set_index("time", inplace=True)
-    return df
+# --- DATA FETCH ---
+@st.cache_data(ttl=3600)
+def get_data(symbol):
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1h&limit=200"
+    try:
+        raw = requests.get(url, timeout=10)
+        raw.raise_for_status()
+        data = raw.json()
+        df = pd.DataFrame(data, columns=["time", "open", "high", "low", "close", "volume", "", "", "", "", "", ""])
+        df["time"] = pd.to_datetime(df["time"], unit="ms")
+        df.set_index("time", inplace=True)
+        df = df[["open", "high", "low", "close", "volume"]].astype(float)
+        return df
+    except Exception as e:
+        st.error(f"API Error: {e}")
+        return pd.DataFrame()
 
-df = fetch_data()
+df = get_data(symbol_binance)
 
-# ========== INDICATORS ==========
-def calculate_rsi(series, period=14):
-    delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=period).mean()
-    avg_loss = loss.rolling(window=period).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+if df.empty or "close" not in df.columns:
+    st.error("🚫 Failed to fetch price data. Check your symbol or Binance API connection.")
+    st.stop()
 
-def calculate_macd(series):
-    ema12 = series.ewm(span=12, adjust=False).mean()
-    ema26 = series.ewm(span=26, adjust=False).mean()
-    macd = ema12 - ema26
-    signal = macd.ewm(span=9, adjust=False).mean()
-    return macd, signal
+latest_price = df["close"].iloc[-1]
 
-rsi = calculate_rsi(df["close"])
-macd, signal = calculate_macd(df["close"])
+# --- INDICATORS ---
+df["RSI"] = RSIIndicator(df["close"]).rsi()
+df["MACD_diff"] = MACD(df["close"]).macd_diff()
+df["EMA50"] = EMAIndicator(df["close"], window=50).ema_indicator()
+df["EMA200"] = EMAIndicator(df["close"], window=200).ema_indicator()
+bb = BollingerBands(df["close"])
+df["BB_upper"] = bb.bollinger_hband()
+df["BB_lower"] = bb.bollinger_lband()
+ichi = IchimokuIndicator(df["high"], df["low"])
+df["Cloud_Lead1"] = ichi.ichimoku_a()
+df["Cloud_Lead2"] = ichi.ichimoku_b()
 
-# ========== PRICE ZONES ==========
-last_price = df["close"].iloc[-1]
-discount_zone = df["close"].quantile(0.25)
-premium_zone = df["close"].quantile(0.75)
+premium = df["close"].rolling(24).max()
+discount = df["close"].rolling(24).min()
 
-# ========== GBM FORECAST ==========
-def gbm_forecast(S0, mu, sigma, steps=24):
-    dt = 1 / 24
-    forecast = [S0]
-    for _ in range(steps):
-        dS = forecast[-1] * (mu * dt + sigma * np.random.normal() * np.sqrt(dt))
-        forecast.append(forecast[-1] + dS)
-    return forecast
-
-forecast = gbm_forecast(last_price, mu, sigma)
-
-# ========== LAYOUT ==========
+# --- MAIN DASH ---
+st.title(f"{symbol} Dashboard")
 col1, col2 = st.columns([3, 1])
-
-# -- CHART MAIN --
 with col1:
-    st.markdown("### 🟢 Live ETH/USDT Chart (24H - 1H Candles)")
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df.index, y=df["close"], mode="lines", name="Price"))
-    fig.update_layout(height=400, margin=dict(t=20, b=20))
+    fig.add_trace(go.Scatter(x=df.index, y=df["close"], name="Close"))
+    fig.add_trace(go.Scatter(x=df.index, y=premium, name="Premium", line=dict(dash="dot", color="green")))
+    fig.add_trace(go.Scatter(x=df.index, y=discount, name="Discount", line=dict(dash="dot", color="red")))
     st.plotly_chart(fig, use_container_width=True)
 
-# -- STATS & SIGNALS --
 with col2:
-    st.markdown("### 🧾 Price Info")
-    st.metric("Last Price", f"${last_price:,.2f}")
-    change = (df["close"].iloc[-1] - df["close"].iloc[-2]) / df["close"].iloc[-2] * 100
-    st.metric("24H Change", f"{change:.2f}%")
+    st.subheader("📊 Price Info")
+    st.metric("Last Price", f"${latest_price:,.2f}")
+    st.metric("24H Change", f"{(df['close'].pct_change().iloc[-1] * 100):.2f}%")
+    st.write("RSI:", round(df["RSI"].iloc[-1], 2))
+    st.write("MACD:", "Bullish" if df["MACD_diff"].iloc[-1] > 0 else "Bearish")
+    st.write("EMA Cross:", "Bullish" if df["EMA50"].iloc[-1] > df["EMA200"].iloc[-1] else "Bearish")
 
-    st.markdown("### 🧠 GBM Forecast (24h)")
-    forecast_fig = go.Figure()
-    forecast_fig.add_trace(go.Scatter(y=forecast, mode="lines", name="Forecast Price"))
-    forecast_fig.update_layout(height=250, margin=dict(t=10, b=10))
-    st.plotly_chart(forecast_fig, use_container_width=True)
-
-# ========== ALERTS ==========
-st.markdown("### 🔔 Indicator Alerts")
-rsi_value = rsi.iloc[-1]
-macd_diff = macd.iloc[-1] - signal.iloc[-1]
-macd_prev_diff = macd.iloc[-2] - signal.iloc[-2]
-
-if rsi_value < 30:
-    st.success("🟢 RSI Alert: BUY (Oversold)")
-elif rsi_value > 70:
-    st.error("🔴 RSI Alert: SELL (Overbought)")
+# --- ALERTS ---
+st.subheader("⚠ Indicator Alerts")
+if df["RSI"].iloc[-1] > 70:
+    st.error("RSI: Overbought (SELL)")
+elif df["RSI"].iloc[-1] < 30:
+    st.success("RSI: Oversold (BUY)")
 else:
-    st.info("⚪ RSI: Neutral")
+    st.info("RSI: Neutral")
 
-if macd_diff > 0 and macd_prev_diff < 0:
-    st.success("🟢 MACD Bullish Crossover")
-elif macd_diff < 0 and macd_prev_diff > 0:
-    st.error("🔴 MACD Bearish Crossover")
-else:
-    st.info("⚪ MACD: No Crossover")
+# --- GBM 24H FORECAST (enhanced) ---
+st.subheader("🔮 GBM Forecast (24H)")
+def custom_forecast(S0, mu, sigma, t, phi, lambda_):
+    drift = (mu - 0.5 * sigma ** 2) * t
+    shock = sigma * np.sqrt(t) * phi
+    adjusted = S0 * np.exp((drift + shock) * lambda_)
+    return adjusted
 
-if last_price < discount_zone:
-    st.success("🟢 Price in DISCOUNT zone — potential BUY")
-elif last_price > premium_zone:
-    st.error("🔴 Price in PREMIUM zone — caution")
-else:
-    st.info("⚪ Price in FAIR VALUE zone")
+expected_price = custom_forecast(latest_price, mu, sigma, 1, phi, lambda_)
+st.write(f"*Expected price in 24H:* ${expected_price:,.2f}")
 
-# ========== FOOTER ==========
-st.caption("🔁 Auto-updates every 1 minute — Powered by Binance API + Streamlit + Plotly.")
+std_dev = latest_price * (np.sqrt(np.exp((sigma**2)*1) - 1))
+low = round(expected_price - std_dev, 2)
+high = round(expected_price + std_dev, 2)
+st.write(f"*Confidence range (68%):* ${low} to ${high}")
+
+# --- PER-HOUR FORECAST ---
+st.subheader("🕒 GBM Per-Hour Forecast")
+hours = np.arange(1, 25)
+hourly_forecast = [custom_forecast(latest_price, mu, sigma, t/24, phi, lambda_) for t in hours]
+hourly_df = pd.DataFrame({"Hour": hours, "Forecast": hourly_forecast})
+
+fig2 = go.Figure()
+fig2.add_trace(go.Scatter(x=hourly_df["Hour"], y=hourly_df["Forecast"], name="Forecast", line=dict(color="purple")))
+fig2.update_layout(title="Hourly GBM Forecast", xaxis_title="Hour", yaxis_title="Price (USD)")
+st.plotly_chart(fig2, use_container_width=True)
+
+# --- BACKTEST SIGNAL ---
+st.subheader("📈 Backtest Signal (RSI/MACD)")
+df["Buy"] = (df["RSI"] < 30) & (df["MACD_diff"] > 0)
+df["Sell"] = (df["RSI"] > 70) & (df["MACD_diff"] < 0)
+
+fig3 = go.Figure()
+fig3.add_trace(go.Scatter(x=df.index, y=df["close"], name="Close"))
+fig3.add_trace(go.Scatter(x=df[df["Buy"]].index, y=df[df["Buy"]]["close"], mode="markers", name="Buy", marker=dict(color="green", size=8)))
+fig3.add_trace(go.Scatter(x=df[df["Sell"]].index, y=df[df["Sell"]]["close"], mode="markers", name="Sell", marker=dict(color="red", size=8)))
+fig3.update_layout(title="Backtested Buy/Sell Signals", height=500)
+st.plotly_chart(fig3, use_container_width=True)
+
