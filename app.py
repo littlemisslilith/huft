@@ -9,8 +9,8 @@ from ta.momentum import RSIIndicator
 from ta.trend import MACD, EMAIndicator, IchimokuIndicator
 from ta.volatility import BollingerBands
 
-# --- CONFIG ---
 st.set_page_config(page_title="Crypto Dashboard", layout="wide")
+
 symbols = {"ETH/USDT": "ETHUSDT", "BTC/USDT": "BTCUSDT", "SOL/USDT": "SOLUSDT"}
 symbol = st.sidebar.selectbox("Choose Symbol", list(symbols.keys()))
 symbol_binance = symbols[symbol]
@@ -20,7 +20,6 @@ sigma = st.sidebar.slider("Volatility (σ)", 0.000, 0.100, 0.060)
 phi = st.sidebar.slider("Phi (Drift Adj)", 0.90, 1.10, 1.00)
 lambda_ = st.sidebar.slider("Lambda (Rate)", 0.1, 2.0, 1.0)
 
-# --- DATA FETCH ---
 @st.cache_data(ttl=3600)
 def get_data(symbol):
     url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1h&limit=200"
@@ -39,13 +38,13 @@ def get_data(symbol):
 
 df = get_data(symbol_binance)
 
-if df.empty or "close" not in df.columns:
-    st.error("🚫 Failed to fetch price data. Check your symbol or Binance API connection.")
+# 🚨 FULL safety check:
+if df.empty or "close" not in df.columns or df["close"].dropna().empty:
+    st.error("🚫 Price data unavailable. Binance API might be down or returned no candles.")
     st.stop()
 
-latest_price = df["close"].iloc[-1]
+latest_price = df["close"].dropna().iloc[-1]
 
-# --- INDICATORS ---
 df["RSI"] = RSIIndicator(df["close"]).rsi()
 df["MACD_diff"] = MACD(df["close"]).macd_diff()
 df["EMA50"] = EMAIndicator(df["close"], window=50).ema_indicator()
@@ -60,7 +59,6 @@ df["Cloud_Lead2"] = ichi.ichimoku_b()
 premium = df["close"].rolling(24).max()
 discount = df["close"].rolling(24).min()
 
-# --- MAIN DASH ---
 st.title(f"{symbol} Dashboard")
 col1, col2 = st.columns([3, 1])
 with col1:
@@ -78,7 +76,6 @@ with col2:
     st.write("MACD:", "Bullish" if df["MACD_diff"].iloc[-1] > 0 else "Bearish")
     st.write("EMA Cross:", "Bullish" if df["EMA50"].iloc[-1] > df["EMA200"].iloc[-1] else "Bearish")
 
-# --- ALERTS ---
 st.subheader("⚠ Indicator Alerts")
 if df["RSI"].iloc[-1] > 70:
     st.error("RSI: Overbought (SELL)")
@@ -87,7 +84,6 @@ elif df["RSI"].iloc[-1] < 30:
 else:
     st.info("RSI: Neutral")
 
-# --- GBM 24H FORECAST (enhanced) ---
 st.subheader("🔮 GBM Forecast (24H)")
 def custom_forecast(S0, mu, sigma, t, phi, lambda_):
     drift = (mu - 0.5 * sigma ** 2) * t
@@ -103,7 +99,6 @@ low = round(expected_price - std_dev, 2)
 high = round(expected_price + std_dev, 2)
 st.write(f"*Confidence range (68%):* ${low} to ${high}")
 
-# --- PER-HOUR FORECAST ---
 st.subheader("🕒 GBM Per-Hour Forecast")
 hours = np.arange(1, 25)
 hourly_forecast = [custom_forecast(latest_price, mu, sigma, t/24, phi, lambda_) for t in hours]
@@ -114,7 +109,6 @@ fig2.add_trace(go.Scatter(x=hourly_df["Hour"], y=hourly_df["Forecast"], name="Fo
 fig2.update_layout(title="Hourly GBM Forecast", xaxis_title="Hour", yaxis_title="Price (USD)")
 st.plotly_chart(fig2, use_container_width=True)
 
-# --- BACKTEST SIGNAL ---
 st.subheader("📈 Backtest Signal (RSI/MACD)")
 df["Buy"] = (df["RSI"] < 30) & (df["MACD_diff"] > 0)
 df["Sell"] = (df["RSI"] > 70) & (df["MACD_diff"] < 0)
@@ -125,4 +119,5 @@ fig3.add_trace(go.Scatter(x=df[df["Buy"]].index, y=df[df["Buy"]]["close"], mode=
 fig3.add_trace(go.Scatter(x=df[df["Sell"]].index, y=df[df["Sell"]]["close"], mode="markers", name="Sell", marker=dict(color="red", size=8)))
 fig3.update_layout(title="Backtested Buy/Sell Signals", height=500)
 st.plotly_chart(fig3, use_container_width=True)
+
 
